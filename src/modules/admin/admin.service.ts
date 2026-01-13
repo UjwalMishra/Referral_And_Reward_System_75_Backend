@@ -1,5 +1,4 @@
-import { RewardModel } from "../rewards/reward.model";
-import { UserType } from "../users/user.types";
+import { User } from "../users/user.model";
 
 interface SimpleReportParams {
   page: number;
@@ -8,6 +7,8 @@ interface SimpleReportParams {
   minEarnings?: number;
   userType?: string;
 }
+
+
 
 export const getSimpleReferralReportService = async ({
   page,
@@ -19,43 +20,12 @@ export const getSimpleReferralReportService = async ({
   const skip = (page - 1) * limit;
 
   const pipeline: any[] = [
-    // Group rewards by inviter
-    {
-      $group: {
-        _id: "$user",
-        totalEarnings: { $sum: "$amount" },
-        totalReferrals: { $sum: 1 },
-      },
-    },
-
-    // Filter by min earnings
-    ...(minEarnings
-      ? [
-          {
-            $match: {
-              totalEarnings: { $gte: minEarnings },
-            },
-          },
-        ]
-      : []),
-
-    // Join user
-    {
-      $lookup: {
-        from: "users",
-        localField: "_id",
-        foreignField: "_id",
-        as: "user",
-      },
-    },
-    { $unwind: "$user" },
-
-    // Filter by userType
+    // Optional userType filter early (performance)
     ...(userType
       ? [
           {
             $match: {
-              "user.userType": userType,
+              userType,
             },
           },
         ]
@@ -67,15 +37,48 @@ export const getSimpleReferralReportService = async ({
           {
             $match: {
               $or: [
-                { "user.name": { $regex: search, $options: "i" } },
-                { "user.email": { $regex: search, $options: "i" } },
+                { name: { $regex: search, $options: "i" } },
+                { email: { $regex: search, $options: "i" } },
               ],
             },
           },
         ]
       : []),
 
-    // Count total
+    // LEFT JOIN rewards
+    {
+      $lookup: {
+        from: "rewards",
+        localField: "_id",
+        foreignField: "user",
+        as: "rewards",
+      },
+    },
+
+    // Calculate totals safely
+    {
+      $addFields: {
+        totalEarnings: {
+          $sum: "$rewards.amount",
+        },
+        totalReferrals: {
+          $size: "$rewards",
+        },
+      },
+    },
+
+    // Filter by min earnings
+    ...(minEarnings !== undefined
+      ? [
+          {
+            $match: {
+              totalEarnings: { $gte: minEarnings },
+            },
+          },
+        ]
+      : []),
+
+    // Pagination + count
     {
       $facet: {
         metadata: [{ $count: "total" }],
@@ -86,10 +89,10 @@ export const getSimpleReferralReportService = async ({
           {
             $project: {
               _id: 0,
-              userId: "$user._id",
-              name: "$user.name",
-              email: "$user.email",
-              userType: "$user.userType",
+              userId: "$_id",
+              name: 1,
+              email: 1,
+              userType: 1,
               totalReferrals: 1,
               totalEarnings: 1,
             },
@@ -99,10 +102,11 @@ export const getSimpleReferralReportService = async ({
     },
   ];
 
-  const result = await RewardModel.aggregate(pipeline);
+  const result = await User.aggregate(pipeline);
 
   const total = result[0]?.metadata[0]?.total || 0;
   const data = result[0]?.data || [];
 
   return { total, data };
 };
+
